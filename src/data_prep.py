@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 from scipy.io import loadmat
 
+from sklearn.preprocessing import StandardScaler
+
 RAW_DIR = Path("data/raw")
 CELLS = ["B0006", "B0018"]
 SIGNALS = ["Time", "Voltage_measured", "Current_measured", "Temperature_measured"]
@@ -11,6 +13,15 @@ FIXED_TIMES = [600, 1500, 2400]
 THRESHOLDS = [3.7, 3.5, 3.2]
 LOAD_CURRENT = 1.0
 EOL_CAPACITY = 1.4
+RATED_CAPACITY = 2.0
+FEATURE_COLS = [
+    "v_sag",
+    "v_at_600s", "v_at_1500s", "v_at_2400s",
+    "t_to_3.7v", "t_to_3.5v", "t_to_3.2v",
+    "v_mean",
+    "temp_rise",
+]
+
 
 
 def load_data(data_files):
@@ -135,3 +146,30 @@ def add_features(df):
     eol_cycle = df[df["Capacity"] <= EOL_CAPACITY].groupby("cell")["cycle"].min()
     out["rul"] = df["cell"].map(eol_cycle) - df["cycle"]
     return out
+
+
+def preprocess_data(df):
+    '''
+    Input: the cleaned dataframe with added features
+    Output:
+    - X (features)
+    - y (labels)
+    - groups (cell identifiers)
+    - preprocessor (unfitted `StandardScaler` preprocessor)
+
+    1. Extract features, labels and identifiers from input dataframe
+    2. Return them
+    3. Use transformer `StandardScaler` and return unfitted preprocessor
+    '''
+    X = df[FEATURE_COLS].copy()
+
+    y = pd.DataFrame({
+        "capacity": df["capacity"],
+        "soh": df["capacity"] / RATED_CAPACITY,
+        "rul": df["rul"],
+    })
+
+    groups = df["cell"].copy()
+
+    preprocessor = StandardScaler()
+    return X, y, groups, preprocessor
