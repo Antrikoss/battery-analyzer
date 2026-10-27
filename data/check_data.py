@@ -12,6 +12,43 @@ def load_discharge(name):
     mat = loadmat(RAW_DIR / f"{name}.mat", squeeze_me=True, struct_as_record=False)
     return [c for c in mat[name].cycle if c.type == "discharge"]
 
+def check_capacity(df):
+    '''
+    Check the gap between `Capacity` value and the coulomb count
+    '''
+    integrate = getattr(np, "trapezoid", None) or np.trapz
+    df = df.copy()
+    df["capacity_coulomb"] = [
+        integrate(np.abs(i), t) / 3600
+        for t, i in zip(df["Time"], df["Current_measured"])
+    ]
+    df["capacity_gap"] = df["Capacity"] - df["capacity_coulomb"]
+
+    for name, g in df.groupby("cell"):
+        g = g.sort_values("cycle")
+        corr = g["Capacity"].corr(g["capacity_coulomb"])
+
+        def first_eol(col):
+            hits = g.loc[g[col] <= 1.4, "cycle"]
+            return int(hits.iloc[0]) if len(hits) else None
+
+        print(f"\n--- {name} ---")
+        print(f"Correlation (Capacity vs coulomb count): {corr:.4f}")
+        print(f"Gap (Capacity - coulomb): mean={g['capacity_gap'].mean():+.3f}  "
+              f"mean abs={g['capacity_gap'].abs().mean():.3f}  "
+              f"max abs={g['capacity_gap'].abs().max():.3f} Ah")
+        print(f"Mean gap, first 20 cycles: {g['capacity_gap'].head(20).mean():+.3f} Ah")
+        print(f"Mean gap, last 20 cycles:  {g['capacity_gap'].tail(20).mean():+.3f} Ah")
+        print(f"Last cycle: Capacity={g['Capacity'].iloc[-1]:.3f}  "
+              f"coulomb={g['capacity_coulomb'].iloc[-1]:.3f} Ah")
+        print(f"First cycle at or below 1.4 Ah: Capacity -> {first_eol('Capacity')}, "
+              f"coulomb -> {first_eol('capacity_coulomb')}")
+        worst = g.reindex(g["capacity_gap"].abs().sort_values(ascending=False).index).head(5)
+        print("5 largest gaps:")
+        print(worst[["cycle", "Capacity", "capacity_coulomb", "capacity_gap"]]
+              .round(3).to_string(index=False))
+
+    return df
 
 # ---------- Part 1: format of one cycle ----------
 first = load_discharge(CELLS[0])[0]
