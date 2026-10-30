@@ -1,6 +1,7 @@
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from pathlib import Path
 
 from src.data_prep import (
     CELLS,
@@ -12,6 +13,15 @@ from src.data_prep import (
     preprocess_data,
 )
 from src.pipeline import load_models, predict_health, run_validation
+from src.task_power_model import (
+    CELL_CAPACITY_AH,
+    DRIVER_EFF,
+    MOTOR_EFF,
+    N_CELLS,
+    V_NOM,
+    build_load_profile,
+)
+from src.discharge_model import SHIFT_HOURS, run_discharge_model
 
 FEATURE_INFO = {
     "v_sag": ("Initial voltage sag", "V", 0.01, "%.3f"),
@@ -165,17 +175,98 @@ with st.form("new_battery"):
 if submitted:
     new = pd.DataFrame([values])
     out = predict_health(new, soh_model, rul_model).iloc[0]
-
+    st.session_state["battery_estimate"] = {
+        "soh": float(out["soh"]),
+        "rul": float(out["rul"]),
+        "outside": [
+            c for c in FEATURE_COLS
+            if not df[c].min() <= values[c] <= df[c].max()
+        ],
+    }
+ 
+if "battery_estimate" in st.session_state:
+    battery = st.session_state["battery_estimate"]
     r1, r2 = st.columns(2)
-    r1.metric("Predicted SoH", f"{out['soh']:.1%}", help=f"Equivalent capacity: {out['soh'] * RATED_CAPACITY:.2f} Ah")
-    r2.metric("Predicted RUL", f"{out['rul']:.0f} cycles")
-
-    outside = [
-        c for c in FEATURE_COLS
-        if not df[c].min() <= values[c] <= df[c].max()
-    ]
-    if outside:
+    r1.metric(
+        "Predicted SoH", f"{battery['soh']:.1%}",
+        help=f"Equivalent capacity: {battery['soh'] * RATED_CAPACITY:.2f} Ah",
+    )
+    r2.metric("Predicted RUL", f"{battery['rul']:.0f} cycles")
+    if battery["outside"]:
         st.warning(
             "These inputs are outside the range seen in training, so the linear model is "
-            "extrapolating and the prediction is unreliable: " + ", ".join(outside)
+            "extrapolating and the prediction is unreliable: " + ", ".join(battery["outside"])
         )
+
+st.header("5. Runtime estimate for a task")
+st.write("Combine the predicted battery health with the load of a robot joint task.")
+ 
+battery = st.session_state.get("battery_estimate")
+if battery is None:
+    st.info("Predict a battery's health in section 4 first.")
+ 
+csv_files = sorted(Path("data").glob("*.csv"))
+col_file, col_shift = st.columns([2, 1])
+with col_file:
+    chosen = st.selectbox("Task data file (from data/)", csv_files, format_func=lambda p: p.name)
+    uploaded = st.file_uploader("...or upload a CSV (time, torque, angular_velocity)", type="csv")
+with col_shift:
+    shift_hours = st.number_input("Shift length (hours)", min_value=1.0, value=SHIFT_HOURS, step=1.0)
+ 
+source = uploaded if uploaded is not None else chosen
+calculate = st.button("Calculate runtime", disabled=battery is None or source is None)
+ 
+if calculate:
+    if battery["soh"] <= 0:
+        st.error("The predicted SoH is not positive, so no runtime can be computed. Check the inputs in section 4.")
+    else:
+        if hasattr(source, "seek"):
+            source.seek(0)
+        try:
+            profile, summary = build_load_profile(source)
+        except ValueError as err:
+            st.error(f"Could not read the task data: {err}")
+        else:
+            result = run_discharge_model(summary, battery["soh"], battery["rul"], shift_hours)
+ 
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Task power (X)", f"{summary['avg_power_w']:.0f} W")
+            m2.metric("Battery SoH (Y)", f"{battery['soh']:.1%}")
+            m3.metric("Battery RUL (Z)", f"{battery['rul']:.0f} cycles")
+            m4.metric("Runtime (T)", f"{result['runtime_h']:.2f} h")
+ 
+            st.success(
+                f"This task draws **{summary['avg_power_w']:.0f} W**; this battery measures "
+                f"SoH **{battery['soh']:.1%}** and RUL **{battery['rul']:.0f} cycles**; "
+                f"so the runtime is **{result['runtime_h']:.2f} hours**."
+            )
+ 
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Energy per task", f"{result['energy_per_task_wh']:.1f} Wh")
+            d2.metric("Tasks per charge", f"{result['tasks_per_charge']:.1f}")
+            d3.metric("Charge cycles per shift", f"{result['cycles_per_shift']:.1f}")
+            d4.metric("Shifts left", f"{result['shifts_left']:.1f}")
+ 
+            st.caption(
+                f"Average load {summary['avg_c_rate']:.2f}C, peak {summary['peak_c_rate']:.1f}C "
+                "(the battery models were trained at about 1C)."
+            )
+            if not 0.5 <= summary["avg_c_rate"] <= 1.5:
+                st.warning(
+                    "The average load is far from the 1C condition the battery models were "
+                    "trained on, so treat the SoH and RUL with caution."
+                )
+ 
+            fig = px.line(
+                profile, x="time", y="p_batt_w",
+                render_mode="svg",
+                labels={"time": "Time (s)", "p_batt_w": "Battery power (W)"},
+            )
+            st.plotly_chart(fig)
+ 
+st.caption(
+    f"Assumptions: single joint, {N_CELLS}-cell series pack of {CELL_CAPACITY_AH:.0f} Ah cells at "
+    f"{V_NOM} V nominal, motor efficiency {MOTOR_EFF}, driver efficiency {DRIVER_EFF}, "
+    "no regeneration. The bundled task data is synthetic."
+)
+ 
