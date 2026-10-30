@@ -106,11 +106,3 @@ def build_load_profile(data_file):
     df = convert_mech_to_elec(df)
     df = compute_current_and_crate(df)
     return df, summarize_load(df)
-
-
-if __name__ == "__main__":
-    profile, summary = build_load_profile(Path("data/joint_profile.csv"))
-    print(profile.head())
-    print()
-    for key, value in summary.items():
-        print(f"{key:18s} {value:.3f}")
